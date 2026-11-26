@@ -1,14 +1,19 @@
 import time
 import tkinter as tk
+from water_check import get_water_advice
 
 WORK_INTERVAL_SECONDS = 10   # Change to 45 * 60 (2700) for real 45-min work blocks
 BREAK_DURATION_SECONDS = 15  # Change to 120 for a real 2-min break
 SNOOZE_SECONDS = 5           # Change to 5 * 60 (300) for a real 5-min snooze
 
-snoozes_left = 1
+snoozes_left = 3
+glasses_drunk = 0
+breaks_taken = 0
 
 def show_break_screen():
-    global snoozes_left
+    global snoozes_left, glasses_drunk, breaks_taken
+    breaks_taken += 1
+
     root = tk.Tk()
     root.title("Acyture Break Guard")
     root.attributes("-fullscreen", True)
@@ -27,11 +32,12 @@ def show_break_screen():
         fg="#38BDF8",
         bg="#0F172A"
     )
-    title.pack(pady=(140, 20))
+    title.pack(pady=(120, 20))
 
+    initial_advice = get_water_advice(glasses_drunk, breaks_taken)
     subtitle = tk.Label(
         root,
-        text="Stand up, grab a glass of water, and give your eyes a rest.",
+        text=f"Total: {glasses_drunk}/15 cups — {initial_advice}",
         font=("Segoe UI", 20),
         fg="#CBD5E1",
         bg="#0F172A"
@@ -45,7 +51,25 @@ def show_break_screen():
         fg="#F8FAFC",
         bg="#0F172A"
     )
-    timer_label.pack(pady=40)
+    timer_label.pack(pady=30)
+
+    def add_glass():
+        global glasses_drunk
+        glasses_drunk += 1
+        new_advice = get_water_advice(glasses_drunk, breaks_taken)
+        subtitle.config(text=f"Total: {glasses_drunk}/15 cups — {new_advice}")
+
+    drink_btn = tk.Button(
+        root,
+        text="💧 I Drank 1 Tiny Cup (+1)",
+        font=("Segoe UI", 16, "bold"),
+        fg="#0F172A",
+        bg="#38BDF8",
+        padx=20,
+        pady=10,
+        command=add_glass
+    )
+    drink_btn.pack(pady=10)
 
     def trigger_snooze():
         global snoozes_left
@@ -65,7 +89,7 @@ def show_break_screen():
             pady=10,
             command=trigger_snooze
         )
-        snooze_btn.pack(pady=20)
+        snooze_btn.pack(pady=15)
 
     def countdown(remaining):
         if remaining > 0:
@@ -87,4 +111,4 @@ if __name__ == "__main__":
             print("Snoozed! Waiting before next break...")
             time.sleep(SNOOZE_SECONDS)
             show_break_screen()
-        snoozes_left = 1  # Reset snooze for the next work cycle
+        snoozes_left = 3  # Reset snooze for the next work cycle
