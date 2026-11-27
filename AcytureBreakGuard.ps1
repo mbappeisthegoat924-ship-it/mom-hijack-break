@@ -1,14 +1,31 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# Normal work schedule settings (1 hour = 3600s, 2 min = 120s, 5 min = 300s)
-$WorkIntervalSeconds = 3600
-$BreakDurationSeconds = 120
-$SnoozeSeconds = 300
+# Enable DPI awareness so boxes and text align pixel-for-pixel at 100%, 125%, or 150% scaling
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class DpiHelper {
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
+}
+"@
+[void][DpiHelper]::SetProcessDPIAware()
+
+# ==========================================================
+# TEST MODE SETTINGS (Change these 3 numbers for real mode!)
+# Real mode: $WorkIntervalSeconds = 3600 (1 hour)
+#            $BreakDurationSeconds = 60  (1 minute per hour)
+#            $SnoozeSeconds = 300        (5 minutes)
+# ==========================================================
+$WorkIntervalSeconds = 5
+$BreakDurationSeconds = 15
+$SnoozeSeconds = 5
 
 $script:SnoozesLeft = 3
 $script:GlassesDrunk = 0
 $script:BreaksTaken = 0
+$script:QuitApp = $false
 
 function Get-BestFontName {
     $installed = (New-Object System.Drawing.Text.InstalledFontCollection).Families.Name
@@ -18,7 +35,6 @@ function Get-BestFontName {
 }
 
 function Test-InTeamsMeeting {
-    # Checks Windows microphone usage registry for active Teams calls
     $micPaths = @(
         "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged",
         "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
@@ -28,9 +44,7 @@ function Test-InTeamsMeeting {
             Get-ChildItem $basePath -ErrorAction SilentlyContinue | ForEach-Object {
                 if ($_.PSChildName -match "Teams") {
                     $stopTime = (Get-ItemProperty $_.PSPath -Name "LastUsedTimeStop" -ErrorAction SilentlyContinue).LastUsedTimeStop
-                    if ($stopTime -eq 0) {
-                        return $true
-                    }
+                    if ($stopTime -eq 0) { return $true }
                 }
             }
         }
@@ -38,7 +52,7 @@ function Test-InTeamsMeeting {
     return $false
 }
 
-function New-RoundedPath([int]$x, [int]$y, [int]$w, [int]$h, [int]$r) {
+function New-RoundedPath([float]$x, [float]$y, [float]$w, [float]$h, [float]$r) {
     $path = New-Object System.Drawing.Drawing2D.GraphicsPath
     $d = $r * 2
     $path.AddArc($x, $y, $d, $d, 180, 90)
@@ -49,10 +63,9 @@ function New-RoundedPath([int]$x, [int]$y, [int]$w, [int]$h, [int]$r) {
     return $path
 }
 
-function Set-RoundedRegion($control, [int]$radius) {
-    $path = New-RoundedPath 0 0 $control.Width $control.Height $radius
-    $control.Region = New-Object System.Drawing.Region($path)
-    $path.Dispose()
+function Draw-CenteredText($g, [string]$text, $font, $brush, [float]$centerX, [float]$y) {
+    $size = $g.MeasureString($text, $font)
+    $g.DrawString($text, $font, $brush, ($centerX - ($size.Width / 2)), $y)
 }
 
 function Get-WaterAdvice($glasses, $breakNum) {
@@ -72,170 +85,210 @@ function Show-BreakScreen([bool]$IsSnoozeRetry = $false) {
 
     $script:WasSnoozed = $false
     $script:Remaining = $BreakDurationSeconds
+    $script:HoverDrink = $false
+    $script:HoverSnooze = $false
     $fontName = Get-BestFontName
 
-    # Cover all monitors, but target the external monitor if connected
-    $vBounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    # Target external monitor if connected; fallback to primary monitor
     $allScreens = [System.Windows.Forms.Screen]::AllScreens
     $targetScreen = $allScreens | Where-Object { -not $_.Primary } | Select-Object -First 1
     if (-not $targetScreen) {
         $targetScreen = [System.Windows.Forms.Screen]::PrimaryScreen
     }
-    $targetBounds = $targetScreen.Bounds
+    $bounds = $targetScreen.Bounds
 
+    $centerX = [int]($bounds.Width / 2)
+    $centerY = [int]($bounds.Height / 2)
+    $cardW = [Math]::Min(860, [int]($bounds.Width * 0.80))
+    $cardH = 450
+    $cardX = $centerX - [int]($cardW / 2)
+    $cardY = $centerY - [int]($cardH / 2)
+
+    # Smooth button hitboxes (no Set-RoundedRegion clipping!)
+    $drinkRect = New-Object System.Drawing.Rectangle(($centerX - 150), ($cardY + 265), 300, 50)
+    $snoozeRect = New-Object System.Drawing.Rectangle(($centerX - 140), ($cardY + 332), 280, 44)
+
+    # Pre-render static background + glass card once
+    $staticBg = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+    $bgG = [System.Drawing.Graphics]::FromImage($staticBg)
+    $bgG.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+
+    $fullRect = New-Object System.Drawing.Rectangle(0, 0, $bounds.Width, $bounds.Height)
+    $bgBrush = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
+        $fullRect,
+        [System.Drawing.Color]::FromArgb(4, 47, 46),
+        [System.Drawing.Color]::FromArgb(13, 148, 136),
+        [System.Drawing.Drawing2D.LinearGradientMode]::Vertical
+    )
+    $bgG.FillRectangle($bgBrush, $fullRect)
+    $bgBrush.Dispose()
+
+    $cardPath = New-RoundedPath $cardX $cardY $cardW $cardH 28
+    $cardBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(85, 2, 24, 23))
+    $borderPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(140, 94, 234, 212), 2)
+    $bgG.FillPath($cardBrush, $cardPath)
+    $bgG.DrawPath($borderPen, $cardPath)
+    $cardBrush.Dispose()
+    $borderPen.Dispose()
+    $cardPath.Dispose()
+    $bgG.Dispose()
+
+    # Fonts & Brushes
+    $titleFont = New-Object System.Drawing.Font($fontName, 26, [System.Drawing.FontStyle]::Regular)
+    $adviceFont = New-Object System.Drawing.Font($fontName, 15, [System.Drawing.FontStyle]::Regular)
+    $timerFont = New-Object System.Drawing.Font($fontName, 22, [System.Drawing.FontStyle]::Regular)
+    $btnFont = New-Object System.Drawing.Font($fontName, 13, [System.Drawing.FontStyle]::Regular)
+    $snoozeFont = New-Object System.Drawing.Font($fontName, 12, [System.Drawing.FontStyle]::Regular)
+    $hintFont = New-Object System.Drawing.Font($fontName, 10, [System.Drawing.FontStyle]::Regular)
+
+    $titleBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(204, 251, 241))
+    $adviceBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(240, 253, 250))
+    $whiteBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::White)
+    $darkTextBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(4, 47, 46))
+    $hintBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(153, 246, 228))
+
+    # Double-buffered Form (zero flicker, smooth anti-aliased rendering)
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Acyture Break Guard"
     $form.FormBorderStyle = "None"
     $form.StartPosition = "Manual"
-    $form.Location = New-Object System.Drawing.Point($vBounds.X, $vBounds.Y)
-    $form.Size = New-Object System.Drawing.Size($vBounds.Width, $vBounds.Height)
+    $form.Location = New-Object System.Drawing.Point($bounds.X, $bounds.Y)
+    $form.Size = New-Object System.Drawing.Size($bounds.Width, $bounds.Height)
     $form.TopMost = $true
     $form.KeyPreview = $true
 
-    $form.Add_FormClosing({
-        if ($script:Remaining -gt 0 -and -not $script:WasSnoozed) {
-            $_.Cancel = $true
-        }
-    })
+    $doubleBufferProp = [System.Windows.Forms.Control].GetProperty("DoubleBuffered", [System.Reflection.BindingFlags]"NonPublic,Instance")
+    $doubleBufferProp.SetValue($form, $true, $null)
 
-    # Calculate centered glass card coordinates on her external monitor
-    $offsetX = $targetBounds.X - $vBounds.X
-    $offsetY = $targetBounds.Y - $vBounds.Y
-    $centerX = $offsetX + [int]($targetBounds.Width / 2)
-    $centerY = $offsetY + [int]($targetBounds.Height / 2)
-
-    $cardW = [Math]::Min(860, [int]($targetBounds.Width * 0.75))
-    $cardH = 440
-    $cardX = $centerX - [int]($cardW / 2)
-    $cardY = $centerY - [int]($cardH / 2)
-
-    # Turquoise-teal gradient + curved translucent center card
     $form.Add_Paint({
         param($sender, $e)
-        $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $g = $e.Graphics
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
 
-        $rect = New-Object System.Drawing.Rectangle(0, 0, $form.Width, $form.Height)
-        $bgBrush = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-            $rect,
-            [System.Drawing.Color]::FromArgb(4, 47, 46),
-            [System.Drawing.Color]::FromArgb(13, 148, 136),
-            [System.Drawing.Drawing2D.LinearGradientMode]::Vertical
-        )
-        $e.Graphics.FillRectangle($bgBrush, $rect)
-        $bgBrush.Dispose()
+        # Draw cached gradient & card
+        $g.DrawImageUnscaled($staticBg, 0, 0)
 
-        # Curved glass card
-        $cardPath = New-RoundedPath $cardX $cardY $cardW $cardH 28
-        $cardBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(75, 2, 24, 23))
-        $borderPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(120, 94, 234, 212), 2)
-        $e.Graphics.FillPath($cardBrush, $cardPath)
-        $e.Graphics.DrawPath($borderPen, $cardPath)
-        $cardBrush.Dispose()
-        $borderPen.Dispose()
-        $cardPath.Dispose()
+        # Draw smooth Lexend text directly onto glass card (no boxy label backgrounds!)
+        Draw-CenteredText $g "Time for a water and washroom break" $titleFont $titleBrush $centerX ($cardY + 42)
+
+        $advice = Get-WaterAdvice $script:GlassesDrunk $script:BreaksTaken
+        Draw-CenteredText $g "Total: $($script:GlassesDrunk)/15 cups — $advice" $adviceFont $adviceBrush $centerX ($cardY + 118)
+
+        Draw-CenteredText $g "Screen unlocks in $($script:Remaining)s" $timerFont $whiteBrush $centerX ($cardY + 185)
+
+        # Smooth anti-aliased "+1 cup" pill button
+        $drinkColor = if ($script:HoverDrink) { [System.Drawing.Color]::FromArgb(153, 246, 228) } else { [System.Drawing.Color]::FromArgb(94, 234, 212) }
+        $drinkBrush = New-Object System.Drawing.SolidBrush($drinkColor)
+        $drinkPath = New-RoundedPath $drinkRect.X $drinkRect.Y $drinkRect.Width $drinkRect.Height 25
+        $g.FillPath($drinkBrush, $drinkPath)
+        Draw-CenteredText $g "I drank 1 tiny cup (+1)" $btnFont $darkTextBrush $centerX ($drinkRect.Y + 12)
+        $drinkBrush.Dispose()
+        $drinkPath.Dispose()
+
+        # Smooth anti-aliased "Emergency snooze" pill button
+        if ($script:SnoozesLeft -gt 0) {
+            $snoozeColor = if ($script:HoverSnooze) { [System.Drawing.Color]::FromArgb(254, 240, 138) } else { [System.Drawing.Color]::FromArgb(253, 224, 71) }
+            $snoozeBrush = New-Object System.Drawing.SolidBrush($snoozeColor)
+            $snoozePath = New-RoundedPath $snoozeRect.X $snoozeRect.Y $snoozeRect.Width $snoozeRect.Height 22
+            $g.FillPath($snoozeBrush, $snoozePath)
+            Draw-CenteredText $g "Emergency snooze ($($script:SnoozesLeft) left)" $snoozeFont $darkTextBrush $centerX ($snoozeRect.Y + 10)
+            $snoozeBrush.Dispose()
+            $snoozePath.Dispose()
+        }
+
+        Draw-CenteredText $g "Press Ctrl + Shift + Q anytime to quit Break Guard" $hintFont $hintBrush $centerX ($cardY + 398)
     })
 
-    $title = New-Object System.Windows.Forms.Label
-    $title.Text = "Time for a water and washroom break"
-    $title.Font = New-Object System.Drawing.Font($fontName, 28, [System.Drawing.FontStyle]::Regular)
-    $title.ForeColor = [System.Drawing.Color]::FromArgb(204, 251, 241)
-    $title.BackColor = [System.Drawing.Color]::Transparent
-    $title.AutoSize = $true
-    $form.Controls.Add($title)
-    $title.Location = New-Object System.Drawing.Point(($centerX - [int]($title.Width / 2)), ($cardY + 45))
+    # Hover cursor & highlight detection
+    $form.Add_MouseMove({
+        param($sender, $e)
+        $overDrink = $drinkRect.Contains($e.Location)
+        $overSnooze = ($script:SnoozesLeft -gt 0) -and $snoozeRect.Contains($e.Location)
 
-    $adviceLabel = New-Object System.Windows.Forms.Label
-    $initialAdvice = Get-WaterAdvice $script:GlassesDrunk $script:BreaksTaken
-    $adviceLabel.Text = "Total: $($script:GlassesDrunk)/15 cups — $initialAdvice"
-    $adviceLabel.Font = New-Object System.Drawing.Font($fontName, 16, [System.Drawing.FontStyle]::Regular)
-    $adviceLabel.ForeColor = [System.Drawing.Color]::FromArgb(240, 253, 250)
-    $adviceLabel.BackColor = [System.Drawing.Color]::Transparent
-    $adviceLabel.AutoSize = $true
-    $form.Controls.Add($adviceLabel)
-    $adviceLabel.Location = New-Object System.Drawing.Point(($centerX - [int]($adviceLabel.Width / 2)), ($cardY + 125))
-
-    $timerLabel = New-Object System.Windows.Forms.Label
-    $timerLabel.Text = "Screen unlocks in $($script:Remaining)s"
-    $timerLabel.Font = New-Object System.Drawing.Font($fontName, 22, [System.Drawing.FontStyle]::Regular)
-    $timerLabel.ForeColor = [System.Drawing.Color]::White
-    $timerLabel.BackColor = [System.Drawing.Color]::Transparent
-    $timerLabel.AutoSize = $true
-    $form.Controls.Add($timerLabel)
-    $timerLabel.Location = New-Object System.Drawing.Point(($centerX - [int]($timerLabel.Width / 2)), ($cardY + 195))
-
-    # Rounded "+1 cup" button
-    $drinkBtn = New-Object System.Windows.Forms.Button
-    $drinkBtn.Text = "I drank 1 tiny cup (+1)"
-    $drinkBtn.Font = New-Object System.Drawing.Font($fontName, 13, [System.Drawing.FontStyle]::Regular)
-    $drinkBtn.ForeColor = [System.Drawing.Color]::FromArgb(4, 47, 46)
-    $drinkBtn.BackColor = [System.Drawing.Color]::FromArgb(94, 234, 212)
-    $drinkBtn.FlatStyle = "Flat"
-    $drinkBtn.FlatAppearance.BorderSize = 0
-    $drinkBtn.Size = New-Object System.Drawing.Size(290, 50)
-    $drinkBtn.Location = New-Object System.Drawing.Point(($centerX - 145), ($cardY + 275))
-    Set-RoundedRegion $drinkBtn 22
-    $drinkBtn.Add_Click({
-        $script:GlassesDrunk++
-        $newAdvice = Get-WaterAdvice $script:GlassesDrunk $script:BreaksTaken
-        $adviceLabel.Text = "Total: $($script:GlassesDrunk)/15 cups — $newAdvice"
-        $adviceLabel.Location = New-Object System.Drawing.Point(($centerX - [int]($adviceLabel.Width / 2)), ($cardY + 125))
-    })
-    $form.Controls.Add($drinkBtn)
-
-    # Rounded "Emergency snooze" button
-    if ($script:SnoozesLeft -gt 0) {
-        $snoozeBtn = New-Object System.Windows.Forms.Button
-        $snoozeBtn.Text = "Emergency snooze ($($script:SnoozesLeft) left)"
-        $snoozeBtn.Font = New-Object System.Drawing.Font($fontName, 12, [System.Drawing.FontStyle]::Regular)
-        $snoozeBtn.ForeColor = [System.Drawing.Color]::FromArgb(4, 47, 46)
-        $snoozeBtn.BackColor = [System.Drawing.Color]::FromArgb(253, 224, 71)
-        $snoozeBtn.FlatStyle = "Flat"
-        $snoozeBtn.FlatAppearance.BorderSize = 0
-        $snoozeBtn.Size = New-Object System.Drawing.Size(270, 44)
-        $snoozeBtn.Location = New-Object System.Drawing.Point(($centerX - 135), ($cardY + 345))
-        Set-RoundedRegion $snoozeBtn 20
-        $snoozeBtn.Add_Click({
-            $script:SnoozesLeft--
-            $script:WasSnoozed = $true
-            $timer.Stop()
-            $form.Close()
-        })
-        $form.Controls.Add($snoozeBtn)
-    }
-
-    $timer = New-Object System.Windows.Forms.Timer
-    $timer.Interval = 1000
-    $timer.Add_Tick({
-        $script:Remaining--
-        if ($script:Remaining -gt 0) {
-            $timerLabel.Text = "Screen unlocks in $($script:Remaining)s"
-            $timerLabel.Location = New-Object System.Drawing.Point(($centerX - [int]($timerLabel.Width / 2)), ($cardY + 195))
+        if ($overDrink -or $overSnooze) {
+            $form.Cursor = [System.Windows.Forms.Cursors]::Hand
         } else {
-            $timer.Stop()
-            $form.Close()
+            $form.Cursor = [System.Windows.Forms.Cursors]::Default
+        }
+
+        if ($overDrink -ne $script:HoverDrink -or $overSnooze -ne $script:HoverSnooze) {
+            $script:HoverDrink = $overDrink
+            $script:HoverSnooze = $overSnooze
+            $form.Invalidate()
         }
     })
-    $timer.Start()
 
-    [void]$form.ShowDialog()
-    return $script:WasSnoozed
+    # Click detection for custom smooth buttons
+    $form.Add_MouseClick({
+param($sender, $e)
+if ($drinkRect.Contains($e.Location)) {
+$script:GlassesDrunk++
+$form.Invalidate()
+} elseif (($script:SnoozesLeft -gt 0) -and $snoozeRect.Contains($e.Location)) {
+$script:SnoozesLeft--
+$script:WasSnoozed = $true
+$timer.Stop()
+$form.Close()
 }
-
-while ($true) {
-    Start-Sleep -Seconds $WorkIntervalSeconds
-
-    # Wait politely if she is currently on a Microsoft Teams call
-    while (Test-InTeamsMeeting) {
-        Start-Sleep -Seconds 60
-    }
-
-    $snoozed = Show-BreakScreen
-    if ($snoozed) {
-        Start-Sleep -Seconds $SnoozeSeconds
-        while (Test-InTeamsMeeting) {
-            Start-Sleep -Seconds 60
-        }
-        [void](Show-BreakScreen -IsSnoozeRetry $true)
-    }
-    $script:SnoozesLeft = 3
+})
+# Instant quit hotkey: Ctrl + Shift + Q
+$form.Add_KeyDown({
+param($sender, $e)
+if ($e.Control -and $e.Shift -and $e.KeyCode -eq "Q") {
+$script:QuitApp = $true
+$timer.Stop()
+$form.Close()
+}
+})
+$form.Add_FormClosing({
+if ($script:Remaining -gt 0 -and -not $script:WasSnoozed -and -not $script:QuitApp) {
+$_.Cancel = $true
+}
+})
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 1000
+$timer.Add_Tick({
+$script:Remaining--
+if ($script:Remaining -gt 0) {
+$form.Invalidate()
+} else {
+$timer.Stop()
+$form.Close()
+}
+})
+$timer.Start()
+[void]$form.ShowDialog()
+# Clean up GDI objects
+$staticBg.Dispose()
+$titleFont.Dispose()
+$adviceFont.Dispose()
+$timerFont.Dispose()
+$btnFont.Dispose()
+$snoozeFont.Dispose()
+$hintFont.Dispose()
+$titleBrush.Dispose()
+$adviceBrush.Dispose()
+$whiteBrush.Dispose()
+$darkTextBrush.Dispose()
+$hintBrush.Dispose()
+return $script:WasSnoozed
+}
+while (-not $script:QuitApp) {
+Start-Sleep -Seconds $WorkIntervalSeconds
+if ($script:QuitApp) { break }
+while (Test-InTeamsMeeting) {
+Start-Sleep -Seconds 60
+}
+$snoozed = Show-BreakScreen
+if ($script:QuitApp) { break }
+if ($snoozed) {
+Start-Sleep -Seconds $SnoozeSeconds
+if ($script:QuitApp) { break }
+while (Test-InTeamsMeeting) {
+Start-Sleep -Seconds 60
+}
+[void](Show-BreakScreen -IsSnoozeRetry $true)
+}
+$script:SnoozesLeft = 3
 }
