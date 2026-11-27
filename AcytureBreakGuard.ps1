@@ -192,7 +192,9 @@ function Show-BreakScreen([bool]$IsSnoozeRetry = $false) {
             $snoozeBrush = New-Object System.Drawing.SolidBrush($snoozeColor)
             $snoozePath = New-RoundedPath $snoozeRect.X $snoozeRect.Y $snoozeRect.Width $snoozeRect.Height 22
             $g.FillPath($snoozeBrush, $snoozePath)
-            Draw-CenteredText $g "Emergency snooze ($($script:SnoozesLeft) left)" $snoozeFont $darkTextBrush $centerX ($snoozeRect.Y + 10)
+           $snoozeText = "Emergency snooze - " + $script:SnoozesLeft + " left"
+Draw-CenteredText $g $snoozeText $snoozeFont $darkTextBrush $centerX ($snoozeRect.Y + 10)
+
             $snoozeBrush.Dispose()
             $snoozePath.Dispose()
         }
